@@ -1,10 +1,12 @@
+import time
 import collections
-import functools
 import numpy as np
 import requests
 import msgpack
-import time
 import xarray
+from http.client import HTTPException
+from threading import Thread
+from matplotlib import streamplot
 
 class assembler:
     """Base for the assembler
@@ -17,6 +19,15 @@ class assembler:
     def __repr__(self):
         return self.kind
 
+    def numpyFromHeader(self, header):
+        raise NotImplementedError
+
+    def numpyAddBundle(self, array, bundle):
+        raise NotImplementedError
+
+    def numpyAddTile(self, array, tile):
+        raise NotImplementedError
+    
     def numpy(self, unpacked):
         """Assemble numpy array
 
@@ -50,6 +61,28 @@ class assembler:
         """
         raise NotImplementedError
 
+# Refer to https://numpy.org/doc/stable/user/basics.subclassing.html#basics-subclassing
+class progressive_ndarray(np.ndarray):
+    def __new__(cls, input_array, target_function):
+        obj = np.asarray(input_array).view(cls)
+#        obj = super(progressive_ndarray, cls).__new__(cls, *args, **kwargs)
+        obj.__thread = Thread(target=target_function)
+        obj.__thread.start()
+        return obj
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self.__thread = getattr(obj, '__thread', None)
+
+    def finished_loading(self):
+        if not isinstance(self.__thread, Thread):
+            return True
+        return not self.__thread.is_alive()
+
+    def wait_for(self, timeout=None):
+        if isinstance(self.__thread, Thread):
+            self.__thread.join(timeout=timeout)
+            self.__thread = None # We don´t need this anymore
+
 class assembler_slice(assembler):
     kind = 'slice'
 
@@ -58,25 +91,33 @@ class assembler_slice(assembler):
         self.dims = dimlabels
         self.name = name
 
+    def numpyFromHeader(self, header):
+        dims0 = len(header[0])
+        dims1 = len(header[1])
+        return np.zeros([dims0, dims1], dtype = np.single)
+
+    def numpyAddTile(self, array, tile):
+        dst = tile['initial-skip']
+        chunk_size = tile['chunk-size']
+        src = 0
+        v = tile['v']
+        arr = np.ravel(array)
+        for _ in range(tile['iterations']):
+            arr[dst : dst + chunk_size] = v[src : src + chunk_size]
+            src += tile['substride']
+            dst += tile['superstride']
+
+    def numpyAddBundle(self, array, bundle):
+        for tile in bundle['tiles']:
+            self.numpyAddTile(array, tile)
+
     def numpy(self, unpacked):
         index = unpacked[0]['index']
-        dims0 = len(index[0])
-        dims1 = len(index[1])
-
-        result = np.zeros((dims0 * dims1), dtype = np.single)
+        result = self.numpyFromHeader(index)
         for bundle in unpacked[1]:
-            for tile in bundle['tiles']:
-                layout = tile
-                dst = layout['initial-skip']
-                chunk_size = layout['chunk-size']
-                src = 0
-                v = tile['v']
-                for _ in range(layout['iterations']):
-                    result[dst : dst + chunk_size] = v[src : src + chunk_size]
-                    src += layout['substride']
-                    dst += layout['superstride']
+            self.numpyAddBundle(result, bundle)
 
-        return result.reshape((dims0, dims1))
+        return result
 
     def xarray(self, unpacked):
         index = unpacked[0]['index']
@@ -185,6 +226,9 @@ class cube:
             return self._ijk
 
         resource = f'query/{self.guid}'
+#        loop = asyncio.get_event_loop()
+#        retval = loop.run_until_complete(asyncio.gather(self.session.get(resource)))
+#        r = retval[0]
         r = self.session.get(resource)
         self._ijk = [
             [x for x in dim['keys']] for dim in r.json()['dimensions']
@@ -325,34 +369,129 @@ class process:
         reponse : bytes
             The (possibly cached) response
         """
-        try:
+        if hasattr(self,"_cached_raw"):
             return self._cached_raw
-        except AttributeError:
-            stream = f'{self.result_url}/stream'
-            r = self.session.get(stream)
-            self._cached_raw = r.content
-            return self._cached_raw
+
+        url = f'{self.result_url}'
+#        url = f'{self.result_url}/stream'
+        r = self.session.get(url)
+        self._cached_raw = r.content
+        return self._cached_raw
+
+    def stream_raw(self):
+        """Get the raw response as a stream.
+        """
+        url = f'{self.result_url}/stream'
+#        def _hook(resp, **kwargs):
+#            print("in hook: {}".format(resp.headers.get("X-OnePac-Status", "unknown")))
+#            return resp
+#        response = self.session.get(stream, stream=True, hooks={"response": _hook})
+#        response = self.session.get(stream, stream=True)
+#        decoder = msgpack.Unpacker()
+        with self.session.get(url) as response:
+#            header = None
+            response.raise_for_status()
+            chunks = []
+            num_bytes_downloaded = 0
+            self.status = response.headers.get("X-OnePac-Status", "unknown")
+            try:
+                expLength = -1
+                fragmentLen = 0
+                for chunk in response.iter_content(chunk_size=None):
+#                    print("Chunk len={}  downloaded={}".format(len(chunk), num_bytes_downloaded))
+                    if expLength < 0:
+                        try:
+                            expLength = int(chunk.decode())
+#                            print("received expLen={}".format(expLength))
+                            continue
+                        except Exception as ex:
+                            return # TODO
+                            if len(chunk) == 0:
+                                raise HTTPException("Server closed connection prematurely")
+                            raise ex #ServerError("Bad data from server: {}".format(str(ex)))
+
+                    chunks.append(chunk)
+                    fragmentLen += len(chunk)
+                    num_bytes_downloaded += len(chunk)
+
+                    if fragmentLen > expLength:
+                        # SHould not happen...
+                        # TODO: split chunk if it does?
+                        print("expLen={}  fragmentLen={} ".format(expLength, fragmentLen))
+                    elif fragmentLen == expLength:
+                        f = b''.join(chunks) or b''
+                        yield f
+                        expLength = -1
+                        fragmentLen = 0
+                        chunks = []
+
+                    self.status = str(num_bytes_downloaded)#response.headers.get("X-OnePac-Status", "unknown")
+
+                self.status = str(num_bytes_downloaded)#response.headers.get("X-OnePac-Status", "unknown")
+            except Exception as ex:
+                self.status = str(ex)
+                raise ex
+
+    def stream(self):
+        """
+        Generate a stream from parsed response-blocks
+        """
+        decoder = msgpack.Unpacker()
+        header = None
+        for raw in self.stream_raw():
+            decoder.feed(raw)
+            time.sleep(0.2) # TODO: remove - just for demo-purposes
+            if header is None:
+                header = {}
+                header['arrayheader1'] = decoder.read_array_header()
+                header['mapheader'] = decoder.read_map_header()
+
+                for _ in ("Bundles", "Shape", "Index"):
+                    key, val = decoder.unpack(), decoder.unpack()
+                    header[key] = val
+                
+                header['arrayheader2'] = decoder.read_array_header()
+                yield header
+            else:
+                fragment = decoder.unpack()
+                yield fragment
 
     def get(self):
-        """Get the parsed response
+        """Get the parsed response synchronously
         """
-        return msgpack.unpackb(self.get_raw())
-
-    def numpy(self):
         try:
+            return msgpack.unpackb(b''.join([b for b in self.stream_raw()]))
+        except Exception:
+            raise HTTPException("Invalid data returned from server")
+
+    def numpy(self, callback = None):
+
+        if hasattr(self,"_cached_numpy"):
             return self._cached_numpy
-        except AttributeError:
-            raw = self.get()
-            self._cached_numpy = self.assembler.numpy(raw)
+
+        if callback is None:
+            self._cached_numpy = self.assembler.numpy(self.get())
             return self._cached_numpy
+
+        assert callable(callback)
+        
+        gen = self.stream()  # create the async generator
+        header = next(gen)
+        r = self.assembler.numpyFromHeader(header["index"])
+        def drain():
+            for chunk in gen:
+                self.assembler.numpyAddBundle(r, chunk)
+                callback(r)
+
+        self._cached_numpy = progressive_ndarray(r, drain)
+        return self._cached_numpy
 
     def xarray(self):
-        try:
+        if hasattr(self,"_cached_xarray"):
             return self._cached_xarray
-        except AttributeError:
-            raw = self.get()
-            self._cached_xarray = self.assembler.xarray(raw)
-            return self._cached_xarray
+
+        self._cached_xarray = self.assembler.xarray(self.get())
+        return self._cached_xarray
 
     def withcompression(self, kind = 'gz'):
         """Get response compressed if available
@@ -415,7 +554,7 @@ def schedule(session, resource, data = None):
     -----
     Scheduling a process manually is reserved for the implementation.
     """
-    r = session.get(resource, data = data)
+    r = session.get(resource, params = data)
 
     body = r.json()
     auth = 'Bearer {}'.format(body['authorization'])
@@ -452,9 +591,9 @@ class http_session(requests.Session):
     low-level network-oriented code.
     """
     def __init__(self, base_url, tokens = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.base_url = base_url
         self.tokens = tokens
-        super().__init__(*args, **kwargs)
 
     def merge_auth_headers(self, kwargs):
         if self.tokens is None:
@@ -513,8 +652,9 @@ class http_session(requests.Session):
         >>> session.get('/needs-auth', headers = { 'Accept': 'text/html' })
         >>> session.get('/no-auth', headers = { 'Authorization': None })
         """
+        
         kwargs = self.merge_auth_headers(kwargs)
-        r = super().get(f'{self.base_url}/{url}', *args, **kwargs)
+        r = super().get(f'{self.base_url}/{url}', *args, **kwargs, stream=True)
         r.raise_for_status()
         return r
 
@@ -574,6 +714,12 @@ class http_session(requests.Session):
         """
         from ..login.login import config, tokens
         cfg = config(cache_dir = cache_dir).load()
+        # cfg.update(
+        #     {'url': 'http://localhost:8080',
+        #        'client_id': 'MY_ID',
+        #        'auth_server': 'http://auth:8089/common',
+        #        'scopes': ['api://5a00a74a-2af7-40e0-a5a6-af94581715ae/One.Read'],
+        #        'timeout': 60})
         auth = tokens(cache_dir = cache_dir).load(cfg)
         return http_session(base_url = cfg['url'], tokens = auth)
 
@@ -598,6 +744,9 @@ def ls(session):
     oneseismic.client.cube
     """
     return session.get('query').json()['links'].keys()
+#    loop = asyncio.get_event_loop()
+#    retval = loop.run_until_complete(asyncio.gather(session.get('query')))
+#    return retval[0].json()['links'].keys()
 
 class cubes(collections.abc.Mapping):
     """Dict-like interface to cubes in the oneseismic subscription

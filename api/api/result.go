@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/equinor/oneseismic/api/internal/auth"
@@ -90,7 +91,15 @@ func collectResult(
 		}
 
 		for _, message := range reply[0].Messages {
-			for _, tile := range message.Values {
+
+			for key, tile := range message.Values {
+
+				// this is the signal from fragment-server that a fragment failed
+				if key == "error" {
+					failure <- errors.New(tile.(string))
+					return
+				}
+
 				chunk, ok := tile.(string)
 				if !ok {
 					msg := fmt.Sprintf("tile.type = %T; expected []byte]", tile)
@@ -126,26 +135,49 @@ func (r *Result) Stream(ctx *gin.Context) {
 	failure := make(chan error)
 	go collectResult(ctx, r.Storage, pid, head, tiles, failure)
 
+	num := 0
 	w := ctx.Writer
 	header := w.Header()
 	header.Set("Transfer-Encoding", "chunked")
-	header.Set("Content-Type", "text/html")
+	header.Set("Content-Type", "text/html")  // TODO: Uhh....?
+	// See https://stackoverflow.com/a/62503611
+	// TODO: Can we use this for final status?
+	// Problem seems to be that no Python client-lib deals with it...
+	header.Set("Trailer", "X-OnePac-Status")
+	header.Set("X-OnePac-Status", "streaming")
 	w.WriteHeader(http.StatusOK)
 
 	for {
 		select {
 		case output, ok := <-tiles:
 			if !ok {
+				log.Printf("pid=%s finished, setting status-header", pid)
+				header.Set("X-OnePac-Status", "done")
 				w.(http.Flusher).Flush()
 				return
 			}
+			// In order to deal with chunking in the http-layer, send length of byte-array first...
+			// TODO: Stuff this into the packed bytes
+			w.Write([]byte(strconv.Itoa(len(output))))
+			w.(http.Flusher).Flush()
+			// ...  then send the tile itself. Now, the client should be able to assemble
+			// the tile and unpack it
 			w.Write(output)
+			w.(http.Flusher).Flush()
+
+			//log.Printf("pid=%s, pushed chunk %v (%v bytes)", pid, num, len(output))
+			num++
 
 		case err := <-failure:
-			log.Printf("pid=%s, %s", pid, err)
+			log.Printf("pid=%s, failure in STREAM: %s", pid, err)
+			ctx.AbortWithStatus(http.StatusInternalServerError)
+			w.(http.Flusher).Flush()
+			header.Set("X-OnePac-Status", err.Error())
 			return
 		}
 	}
+	// Should never get here...
+	header.Set("X-OnePac-Status", "done")
 }
 
 func (r *Result) Get(ctx *gin.Context) {
