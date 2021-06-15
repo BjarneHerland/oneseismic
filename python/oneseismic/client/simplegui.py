@@ -27,7 +27,7 @@ def cb(array):
     print("array: {}  nonzeros: {}  finished: {}".format(
                      type(array),
                      np.count_nonzero(array),
-                     array.finished_loading()))
+                     progres.finished_loading()))
     img = getattr(cb, "_img", None)
     if img is None:
         cb._img = axis.imshow(array.T)
