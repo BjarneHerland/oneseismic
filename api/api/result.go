@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+//	"strconv"
 	"time"
 
 	"github.com/equinor/oneseismic/api/internal/auth"
@@ -77,6 +78,7 @@ func collectResult(
 
 	streamCursor := "0"
 	count := 0
+	log.Printf("%s processing %d tasks...", pid, head.Ntasks)
 	for count < head.Ntasks {
 		xreadArgs := redis.XReadArgs{
 			Streams: []string{pid, streamCursor},
@@ -106,10 +108,12 @@ func collectResult(
 
 				tiles <- []byte(chunk)
 				count++
+				log.Printf("%s done %d", pid, count)
 			}
 			streamCursor = message.ID
 		}
 	}
+	log.Printf("%s  collectResult done", pid)
 }
 
 func (r *Result) Stream(ctx *gin.Context) {
@@ -135,25 +139,41 @@ func (r *Result) Stream(ctx *gin.Context) {
 	w := ctx.Writer
 	header := w.Header()
 	header.Set("Transfer-Encoding", "chunked")
-	header.Set("Content-Type", "text/html")
+	header.Set("Content-Type", "text/html")  // TODO: Uhh.... text/html ??
+	// See https://stackoverflow.com/a/62503611
+	// TODO: Can we use this for final status?
+	// The practical problem is that AFAICS no Python client-lib handles trailer-headers
+	//header.Set("Trailer", "X-OnePac-Status")
+	//header.Set("X-OnePac-Status", "streaming")
 	w.WriteHeader(http.StatusOK)
 
 	for {
 		select {
 		case output, ok := <-tiles:
 			if !ok {
+				log.Printf("pid=%s finished - flushing and closing", pid)
+				//header.Set("X-OnePac-Status", "done")
 				w.(http.Flusher).Flush()
 				return
 			}
-			w.Write(output)
+			// To allow the client to handle chunking in the http-layer
+			// we include the length of the payload. This is because
+			// msgpack requires a complete bytearray to unpack. To make
+			// things simple, length is represented as a 10-character
+			// string which is sufficient to represent any 32bit integer.
+			w.Write(append([]byte(fmt.Sprintf("%010d", (10+len(output)))), output...))
+			w.(http.Flusher).Flush()
 
 		case err := <-failure:
-			log.Printf("pid=%s, %s", pid, err)
+			log.Printf("pid=%s, failure in STREAM: %s", pid, err)
 			ctx.AbortWithStatus(http.StatusInternalServerError)
 			w.(http.Flusher).Flush()
+			//header.Set("X-OnePac-Status", err.Error())
 			return
 		}
 	}
+	// Should actually never get here...
+	//header.Set("X-OnePac-Status", "done")
 }
 
 func (r *Result) Get(ctx *gin.Context) {
@@ -184,18 +204,40 @@ func (r *Result) Get(ctx *gin.Context) {
 	go collectResult(ctx, r.Storage, pid, head, tiles, failure)
 
 	result := make([]byte, 0)
+	header := ctx.Writer.Header()
 
-	for tile := range tiles {
-		result = append(result, tile...)
+	count =0
+TILE_LOOP:
+	for {
+		select {
+		case tile, ok := <-tiles:
+			if !ok {
+				log.Printf("pid=%s finished - assembling data and returning", pid)
+				break TILE_LOOP
+			}
+			result = append(result, tile...)
+			count++
+		case err := <-failure:
+			log.Printf("pid=%s, %s", pid, err)
+			//header.Set("X-OnePac-Status", "error")
+			ctx.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
 	}
 
-	err, ok := <-failure
-
-	if ok {
-		log.Printf("pid=%s, %s", pid, err)
+	// Double-check that we actually got the expected number of blocks
+	// In fact, count should be equal to head.Ntasks+1 because we receive
+	// the header separately first
+	// TODO: Not sure if this check is necessary...  probably doesn't hurt
+	// but I don't easily see how it could occur...
+	if count < int64(head.Ntasks) {
+		header.Set("X-OnePac-Status", "error")
 		ctx.AbortWithStatus(http.StatusInternalServerError)
+		return
 	}
 
+	//header.Set("X-OnePac-Status", "done")
+	log.Printf("pid=%s, returning %v bytes data", pid, len(result))
 	ctx.Data(http.StatusOK, "application/octet-stream", result)
 }
 
