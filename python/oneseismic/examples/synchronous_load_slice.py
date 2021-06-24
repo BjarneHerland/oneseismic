@@ -9,15 +9,13 @@ cubes = {
   }
 guid = cubes['sverdrup']
 
-cli = oneseismic.client.new()
-cube = cli.cubes[guid]
-print(cube.shape)
-ijk = cube.ijk
-t0 = time.time()
-slce = cube.slice(dim = 0, lineno = random.choice(ijk[0]))
-
-res = slce.numpy()
-print("Time: {:.2f}s".format(time.time() - t0))
-plt.imshow(res.T)
-plt.show()
-
+with oneseismic.client.new() as cli:
+    cube = cli.cubes[guid]
+    print(cube.shape)
+    ijk = cube.ijk
+    t0 = time.time()
+    slce = cube.slice(dim = 0, lineno = random.choice(ijk[0]))
+    res = slce.numpy()
+    print("Time: {:.2f}s".format(time.time() - t0))
+    plt.imshow(res.T)
+    plt.show()

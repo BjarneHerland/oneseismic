@@ -3,6 +3,9 @@ from .client import cube
 from .client import cubes
 from .client import cli
 
+from contextlib import contextmanager
+
+@contextmanager
 def new(cache_dir = None):
     """Create a new client
 
@@ -31,4 +34,6 @@ def new(cache_dir = None):
      '10e6302b435da5aa6adf538fe0f99ad2c9ba109d']
     """
     session = http_session.fromconfig(cache_dir = cache_dir)
-    return cli(session = session)
+    c = cli(session = session)
+    yield c
+    c.shutdown()
