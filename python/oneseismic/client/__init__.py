@@ -3,6 +3,8 @@ from .client import cube
 from .client import cubes
 from .client import cli
 
+from .client import assembler_slice
+
 from contextlib import contextmanager
 
 @contextmanager

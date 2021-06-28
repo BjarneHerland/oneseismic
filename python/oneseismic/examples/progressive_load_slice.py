@@ -14,7 +14,7 @@ cube = cli.cubes[guid]
 print(cube.shape)
 ijk = cube.ijk
 t0 = time.time()
-slce = cube.slice(dim = 0, lineno = random.choice(ijk[0]))
+slce = cube.sliceResult(dim = 0, lineno = random.choice(ijk[0]))
 
 # Trick to update pyplot image - see e.g. https://stackoverflow.com/a/43885275
 fig, axis = plt.subplots()
