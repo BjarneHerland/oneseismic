@@ -8,6 +8,9 @@ ENV FMT_VERSION 6.1.2
 RUN apt-get update && apt-get install --no-install-recommends -y \
     build-essential \
     cmake \
+    python3 \
+    python3-distutils \
+    python-pybind11 \
     pkg-config \
     wget \
     unzip \

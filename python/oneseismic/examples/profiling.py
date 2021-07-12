@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import pickle
 from timeit import Timer
 import random
@@ -7,6 +8,7 @@ import oneseismic
 
 from oneseismic.client import assembler_slice
 
+import scikit_build_example
 
 def loadSlice():
     cubes = {
@@ -30,12 +32,14 @@ if __name__ == "__main__":
         print("Got raw slice from server...")
         with open('/tmp/slice-raw.pickle','wb') as f:
             pickle.dump(rawSlice, f)
-    
+
     if rawSlice is None:
         raise RuntimeError("Could not find slice...")
 
+    parsedSlice = scikit_build_example.unpack(rawSlice, len(rawSlice)) # Avoid including JITTING
+
     parsedSlice = msgpack.unpackb(rawSlice) # Avoid including JITTING
-    n = 10
+    n = 1
     r = 5
     t = Timer(lambda: msgpack.unpackb(rawSlice, use_list=False))
     times = t.repeat(repeat=r, number=n)
@@ -43,16 +47,34 @@ if __name__ == "__main__":
                                                                         min(times)/n,
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
-    
-    ass = assembler_slice(None,None,None) # Note params - not relevant for numpy
-    ass.numpy(parsedSlice) # Avoid including time spent in JIT
 
-    n = 10
-    r = 5
+    print(parsedSlice[0])
+    ass = assembler_slice(None,None,None) # Note params - not relevant for numpy
+    res = ass.numpy(parsedSlice) # Avoid including time spent in JIT
+
+#    n = 100
+#    r = 5
     t = Timer(lambda: ass.numpy(parsedSlice))
     times = t.repeat(repeat=r, number=n)
     print("Numpy: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
                                                                         min(times)/n,
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
+
+    nativeRes = ass._numpyFromHeader(parsedSlice[0]['index'])
+    print(nativeRes.shape)
+    scikit_build_example.assemble(nativeRes, parsedSlice[1])
+#    n = 100
+#    r = 5
+    t = Timer(lambda: scikit_build_example.assemble(nativeRes, parsedSlice[1]))
+    times = t.repeat(repeat=r, number=n)
+    print("Native: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+                                                                        min(times)/n,
+                                                                        max(times)/n,
+                                                                        np.mean(times)/n))
     
+    plt.figure("Normal numpy")
+    plt.imshow(res.T)
+    plt.figure("Native")
+    plt.imshow(nativeRes.T)
+    plt.show()
