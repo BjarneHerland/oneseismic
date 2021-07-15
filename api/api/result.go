@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-//	"strconv"
+
+	//	"strconv"
 	"time"
 
 	"github.com/equinor/oneseismic/api/internal/auth"
 	"github.com/equinor/oneseismic/api/internal/message"
-	"github.com/go-redis/redis/v8"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 )
 
 type Result struct {
@@ -48,7 +49,7 @@ func parseProcessHeader(doc []byte) (*message.ProcessHeader, error) {
 func resultFromProcessHeader(
 	head *message.ProcessHeader,
 ) *message.ResultHeader {
-	return &message.ResultHeader {
+	return &message.ResultHeader{
 		Bundles: head.Ntasks,
 		Shape:   head.Shape,
 		Index:   head.Index,
@@ -139,7 +140,7 @@ func (r *Result) Stream(ctx *gin.Context) {
 	w := ctx.Writer
 	header := w.Header()
 	header.Set("Transfer-Encoding", "chunked")
-	header.Set("Content-Type", "text/html")  // TODO: Uhh.... text/html ??
+	header.Set("Content-Type", "text/html") // TODO: Uhh.... text/html ??
 	// See https://stackoverflow.com/a/62503611
 	// TODO: Can we use this for final status?
 	// The practical problem is that AFAICS no Python client-lib handles trailer-headers
@@ -158,11 +159,11 @@ func (r *Result) Stream(ctx *gin.Context) {
 			}
 			// To allow the client to handle chunking in the http-layer
 			// we include the length of the payload. This is because
-			// msgpack requires a complete bytearray to unpack. To make
-			// things simple, length is represented as a 10-character
-			// string which is sufficient to represent any 32bit integer.
+			// msgpack requires the complete bytearray when unpacking.
+			// To make this simple, length is represented as a 10-character
+			// string, sufficient to represent any 32bit integer.
 			w.Write(append([]byte(fmt.Sprintf("%010d", (10+len(output)))), output...))
-			w.(http.Flusher).Flush()
+			w.(http.Flusher).Flush() // Perhaps not necessary?
 
 		case err := <-failure:
 			log.Printf("pid=%s, failure in STREAM: %s", pid, err)
@@ -206,7 +207,7 @@ func (r *Result) Get(ctx *gin.Context) {
 	result := make([]byte, 0)
 	header := ctx.Writer.Header()
 
-	count =0
+	count = 0
 TILE_LOOP:
 	for {
 		select {
@@ -261,9 +262,9 @@ func (r *Result) Status(ctx *gin.Context) {
 	body, err := r.Storage.Get(ctx, headerkey(pid)).Bytes()
 	if err == redis.Nil {
 		/* request sucessful, but key does not exist */
-		ctx.JSON(http.StatusAccepted, gin.H {
+		ctx.JSON(http.StatusAccepted, gin.H{
 			"location": fmt.Sprintf("result/%s/status", pid),
-			"status": "pending",
+			"status":   "pending",
 		})
 		return
 	}
@@ -292,15 +293,15 @@ func (r *Result) Status(ctx *gin.Context) {
 
 	// TODO: add (and detect) failed status
 	if done {
-		ctx.JSON(http.StatusOK, gin.H {
+		ctx.JSON(http.StatusOK, gin.H{
 			"location": fmt.Sprintf("result/%s", pid),
-			"status": "finished",
+			"status":   "finished",
 			"progress": completed,
 		})
 	} else {
-		ctx.JSON(http.StatusAccepted, gin.H {
+		ctx.JSON(http.StatusAccepted, gin.H{
 			"location": fmt.Sprintf("result/%s/status", pid),
-			"status": "working",
+			"status":   "working",
 			"progress": completed,
 		})
 	}

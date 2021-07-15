@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <msgpack>
+//#include <msgpack>
 
 namespace one {
 
@@ -147,7 +147,7 @@ struct tile {
     int superstride;
     int substride;
     std::vector< float > v;
-	MSGPACK_DEFINE(iterations, chunk_size, initial_skip, superstride, substride, v);
+//	MSGPACK_DEFINE(iterations, chunk_size, initial_skip, superstride, substride, v);
 };
 
 struct slice_tiles : public MsgPackable< slice_tiles > {

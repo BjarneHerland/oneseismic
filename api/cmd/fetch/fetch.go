@@ -4,8 +4,6 @@ package main
 // #include <stdlib.h>
 // #include "tasks.h"
 import "C"
-import "unsafe"
-
 import (
 	"context"
 	"fmt"
@@ -14,10 +12,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/equinor/oneseismic/api/internal/message"
+	"unsafe"
 
 	"github.com/Azure/azure-storage-blob-go/azblob"
+	"github.com/equinor/oneseismic/api/internal/message"
 	"github.com/go-redis/redis/v8"
 )
 
@@ -96,7 +94,7 @@ func (p *process) c_error() error {
  */
 func exec(msg [][]byte) (*process, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	proc := &process {
+	proc := &process{
 		pid:     string(msg[0]),
 		part:    string(msg[1]),
 		rawtask: msg[2],
@@ -110,7 +108,7 @@ func exec(msg [][]byte) (*process, error) {
 
 	kind := C.CString(proc.task.Function)
 	defer C.free(unsafe.Pointer(kind))
-	proc.cpp = C.newproc(kind);
+	proc.cpp = C.newproc(kind)
 	if proc.cpp == nil {
 		msg := "%s unable to new() proc of kind %s"
 		return proc, fmt.Errorf(msg, proc.logpid(), proc.task.Function)
@@ -190,7 +188,7 @@ type fragment struct {
 func (p *process) add(f fragment) error {
 	buffer := unsafe.Pointer(&f.chunk[0])
 	length := C.int(len(f.chunk))
-	index  := C.int(f.index)
+	index := C.int(f.index)
 	ok := C.add(p.cpp, index, buffer, length)
 	if !ok {
 		return p.c_error()
@@ -232,7 +230,7 @@ func (p *process) pack() []byte {
  */
 func (p *process) container() (azblob.ContainerURL, error) {
 	endpoint := p.task.StorageEndpoint
-	guid     := p.task.Guid
+	guid := p.task.Guid
 	container, err := url.Parse(fmt.Sprintf("%s/%s", endpoint, guid))
 	if err != nil {
 		err = fmt.Errorf("Container URL would be malformed: %w", err)
@@ -240,7 +238,7 @@ func (p *process) container() (azblob.ContainerURL, error) {
 	}
 
 	credentials := azblob.NewTokenCredential(p.task.Token, nil)
-	pipeline    := azblob.NewPipeline(credentials, azblob.PipelineOptions{})
+	pipeline := azblob.NewPipeline(credentials, azblob.PipelineOptions{})
 	return azblob.NewContainerURL(*container, pipeline), nil
 }
 
@@ -257,10 +255,10 @@ func (p *process) container() (azblob.ContainerURL, error) {
  * This function finalizes the process.
  */
 func (p *process) gather(
-	storage    redis.Cmdable,
+	storage redis.Cmdable,
 	nfragments int,
-	fragments  chan fragment,
-	errors     chan error,
+	fragments chan fragment,
+	errors chan error,
 ) {
 	defer p.cleanup()
 	//log.Printf("%s gather %v fragments", p.logpid(), nfragments)
@@ -303,7 +301,7 @@ func (p *process) gather(
 	if err != nil {
 		log.Printf("%s write to storage failed: %v", p.logpid(), err)
 	}
-	storage.Expire(p.ctx, p.pid, 10 * time.Minute)
+	storage.Expire(p.ctx, p.pid, 10*time.Minute)
 	log.Printf("%s written to storage", p.logpid())
 }
 
@@ -317,7 +315,7 @@ func fetchblob(ctx context.Context, blob azblob.BlobURL) ([]byte, error) {
 		azblob.CountToEnd,
 		azblob.BlobAccessConditions{},
 		false,
-		azblob.ClientProvidedKeyOptions {},
+		azblob.ClientProvidedKeyOptions{},
 	)
 	if err != nil {
 		return nil, err
@@ -335,10 +333,10 @@ func fetchblob(ctx context.Context, blob azblob.BlobURL) ([]byte, error) {
  * channel is closed.
  */
 func fetch(
-	ctx       context.Context,
-	tasks     chan task,
+	ctx context.Context,
+	tasks chan task,
 	fragments chan fragment,
-	errors    chan error,
+	errors chan error,
 ) {
 	for task := range tasks {
 		chunk, err := fetchblob(ctx, task.blob)
@@ -346,7 +344,7 @@ func fetch(
 			errors <- err
 			return
 		}
-		fragments <- fragment {
+		fragments <- fragment{
 			index: task.index,
 			chunk: chunk,
 		}

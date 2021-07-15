@@ -6,6 +6,8 @@ import msgpack
 import time
 import xarray
 import gql
+from http.client import HTTPException
+from threading import Thread
 
 from gql.transport.requests import RequestsHTTPTransport
 
@@ -20,6 +22,15 @@ class assembler:
     def __repr__(self):
         return self.kind
 
+    def numpyFromHeader(self, header):
+        raise NotImplementedError
+
+    def numpyAddBundle(self, array, bundle):
+        raise NotImplementedError
+
+    def numpyAddTile(self, array, tile):
+        raise NotImplementedError
+    
     def numpy(self, unpacked):
         """Assemble numpy array
 
@@ -53,6 +64,28 @@ class assembler:
         """
         raise NotImplementedError
 
+# Refer to https://numpy.org/doc/stable/user/basics.subclassing.html#basics-subclassing
+class progressive_ndarray(np.ndarray):
+    def __new__(cls, input_array, target_function):
+        obj = np.asarray(input_array).view(cls)
+#        obj = super(progressive_ndarray, cls).__new__(cls, *args, **kwargs)
+        obj.__thread = Thread(target=target_function)
+        obj.__thread.start()
+        return obj
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self.__thread = getattr(obj, '__thread', None)
+
+    def finished_loading(self):
+        if not isinstance(self.__thread, Thread):
+            return True
+        return not self.__thread.is_alive()
+
+    def wait_for(self, timeout=None):
+        if isinstance(self.__thread, Thread):
+            self.__thread.join(timeout=timeout)
+            self.__thread = None # We don´t need this anymore
+
 class assembler_slice(assembler):
     kind = 'slice'
 
@@ -61,25 +94,33 @@ class assembler_slice(assembler):
         self.dims = dimlabels
         self.name = name
 
+    def _numpyFromHeader(self, header):
+        dims0 = len(header[0])
+        dims1 = len(header[1])
+        return np.zeros([dims0, dims1], dtype = np.single)
+
+    def numpyAddTile(self, array, tile):
+        dst = tile['initial-skip']
+        chunk_size = tile['chunk-size']
+        src = 0
+        v = tile['v']
+        arr = np.ravel(array)
+        for _ in range(tile['iterations']):
+            arr[dst : dst + chunk_size] = v[src : src + chunk_size]
+            src += tile['substride']
+            dst += tile['superstride']
+
+    def numpyAddBundle(self, array, bundle):
+        for tile in bundle['tiles']:
+            self.numpyAddTile(array, tile)
+
     def numpy(self, unpacked):
         index = unpacked[0]['index']
-        dims0 = len(index[0])
-        dims1 = len(index[1])
-
-        result = np.zeros((dims0 * dims1), dtype = np.single)
+        result = self._numpyFromHeader(index)
         for bundle in unpacked[1]:
-            for tile in bundle['tiles']:
-                layout = tile
-                dst = layout['initial-skip']
-                chunk_size = layout['chunk-size']
-                src = 0
-                v = tile['v']
-                for _ in range(layout['iterations']):
-                    result[dst : dst + chunk_size] = v[src : src + chunk_size]
-                    src += layout['substride']
-                    dst += layout['superstride']
+            self.numpyAddBundle(result, bundle)
 
-        return result.reshape((dims0, dims1))
+        return result
 
     def xarray(self, unpacked):
         index = unpacked[0]['index']
@@ -356,34 +397,193 @@ class process:
         reponse : bytes
             The (possibly cached) response
         """
-        try:
-            return self._cached_raw
-        except AttributeError:
-            stream = f'{self.result_url}/stream'
-            r = self.session.get(stream)
-            self._cached_raw = r.content
+        if hasattr(self,"_cached_raw"):
             return self._cached_raw
 
+        url = f'{self.result_url}'
+#        url = f'{self.result_url}/stream'
+        r = self.session.get(url)
+        self._cached_raw = r.content
+        return self._cached_raw
+
+    def stream_raw(self):
+        """Get the raw response as a stream.
+        """
+        url = f'{self.result_url}/stream'
+#        def _hook(resp, **kwargs):
+#            print("in hook: {}".format(resp.headers.get("X-OnePac-Status", "unknown")))
+#            return resp
+#        response = self.session.get(stream, stream=True, hooks={"response": _hook})
+#        response = self.session.get(stream, stream=True)
+#        decoder = msgpack.Unpacker()
+        with self.session.get(url, stream=True) as response:
+#            header = None
+            response.raise_for_status()
+            chunks = []
+            num_bytes_downloaded = 0
+            #self.status = response.headers.get("X-OnePac-Status", "unknown")
+            try:
+                expextedLength = -1
+                payloadLen = 0
+                for buffer in response.iter_content(chunk_size=None):
+                    print("Chunk len={}  downloaded={}".format(len(buffer), num_bytes_downloaded))
+                    num_bytes_downloaded += len(buffer)
+                    self.status = str(num_bytes_downloaded)#response.headers.get("X-OnePac-Status", "unknown")
+
+                    while len(buffer) > 0:
+                        # We want to unpack each fragment independently but complete packed
+                        # fragments is needed for this to work. The HTTP-layer may split/chunk
+                        # fragments during transport, hence we need to know when a complete has
+                        # been received.
+                        # To facilitate this, the server encodes and sends length of the complete
+                        # packed fragment into the first 10 bytes at the start of each new fragment
+                        if expextedLength < 0:  # I.e. we are starting a new fragment
+                            try:
+                                tmp = buffer[:10] # First 10 bytes should be a string-rep of payload-length
+                                expextedLength = int(tmp.decode())-10
+                                buffer = buffer[10:]
+                                print("Received expLen={}".format(expextedLength))
+                                continue # process rest of data
+                            except Exception as ex:
+                                return # TODO
+                                if len(buffer) == 0:
+                                    raise HTTPException("Server closed connection prematurely")
+                                raise ex #ServerError("Bad data from server: {}".format(str(ex)))
+    
+                        print("--> expLen={}  payloadLen={}  len(buffer)={}".format(expextedLength,
+                                                                                    payloadLen,
+                                                                                    len(buffer)))
+                        if payloadLen + len(buffer) == expextedLength:
+                        # The remaining buffer is the rest of the payload
+                            chunks.append(buffer)
+                            f = b''.join(chunks) or b''
+                            yield f
+                            expextedLength = -1
+                            payloadLen = 0
+                            chunks = []
+                            buffer = []
+                        elif payloadLen + len(buffer) > expextedLength:
+                        # Should ideally not happen... It means the HTTP layer transferred data
+                        # from one fragment together with data from mext fragment in the same chunk
+                        # Can happen if the fragments are really small
+                            chunks.append(buffer[:(expextedLength-payloadLen)])
+                            f = b''.join(chunks) or b''
+                            yield f
+                            expextedLength = -1
+                            payloadLen = 0
+                            chunks = []
+                            buffer = buffer[(expextedLength-payloadLen):]
+                        else:
+                            chunks.append(buffer)
+                            payloadLen += len(buffer)
+                            buffer = []
+
+            except Exception as ex:
+                self.status = str(ex)
+                raise ex
+
+    def stream(self):
+        """
+        Generator for parsed fragments/list-of-tiles.
+
+        The first object generated is the header, the remaining are unpacked fragments.
+        """
+        decoder = msgpack.Unpacker()
+        header = None
+        tTot = 0
+        for raw in self.stream_raw():
+            decoder.feed(raw)
+            #time.sleep(0.2) # TODO: remove - just for demo-purposes
+            if header is None:
+                header = {}
+                xCheck = decoder.read_array_header()
+                assert 2 == xCheck, "Incompatible format from server"
+
+                kwValues = decoder.read_map_header()
+                assert 3 == kwValues, "Incompatible format from server"
+                for _ in range(kwValues):
+                    key, val = decoder.unpack(), decoder.unpack()
+                    header[key] = val
+
+                nbundles = decoder.read_array_header()
+                assert nbundles == header["bundles"], "Incompatible format from server"
+                yield header
+            else:
+                t0 = time.time()
+                fragment = decoder.unpack()
+                tTot += time.time()-t0
+                yield fragment
+                
+        print("Total time decoding: {:.2f}s".format(tTot))
+
+    def get_raw(self):
+        """Get the unparsed response
+        Get the raw response for the result. This function will block until the
+        result is ready, but will start downloading data as soon as any is
+        available using the STREAM-endpoint.
+
+        Returns
+        -------
+        reponse : bytes
+            The (possibly cached) response
+        """
+        if hasattr(self,"_cached_raw"):
+            return self._cached_raw
+
+        self._cached_raw = b''.join([b for b in self.stream_raw()])
+        return self._cached_raw
+
     def get(self):
-        """Get the parsed response
+        """Get the parsed response synchronously
         """
         return msgpack.unpackb(self.get_raw())
 
-    def numpy(self):
-        try:
-            return self._cached_numpy
-        except AttributeError:
-            raw = self.get()
-            self._cached_numpy = self.assembler.numpy(raw)
+    def numpy(self, asynchronous = None):
+
+        if hasattr(self,"_cached_numpy"):
             return self._cached_numpy
 
+        gen = self.stream()
+        header = next(gen)
+        self._cached_numpy = self.assembler._numpyFromHeader(header["index"])
+
+        self.__numberOfChunksToLoad = header["bundles"]
+        self.__numberOfChunksLoaded = 0
+        callback = asynchronous
+        self.__event = Event()
+        if not callback:
+            self.__event.clear()
+        else:
+            self.__event.set()
+
+        def drain():
+            tTot = 0
+            for chunk in gen:
+                t0 = time.time()
+                self.assembler._numpyAddBundle(self._cached_numpy, chunk)
+                tTot += time.time()-t0
+                self.__numberOfChunksLoaded += 1
+                if callable(callback):
+                    callback(self._cached_numpy)
+
+            print("Total time patching array: {:.2f}s".format(tTot))
+            self.__event.set() # Notify any waiting threads
+
+        self.__thread = Thread(target=drain)
+        self.__thread.start()
+        self.__event.wait() # If not asynchronous, wait for download to finish
+        return self._cached_numpy
+
+    @property
+    def progress(self):
+        return self.__numberOfChunksLoaded/self.__numberOfChunksToLoad
+
     def xarray(self):
-        try:
+        if hasattr(self,"_cached_xarray"):
             return self._cached_xarray
-        except AttributeError:
-            raw = self.get()
-            self._cached_xarray = self.assembler.xarray(raw)
-            return self._cached_xarray
+
+        self._cached_xarray = self.assembler.xarray(self.get())
+        return self._cached_xarray
 
     def withcompression(self, kind = 'gz'):
         """Get response compressed if available

@@ -36,45 +36,62 @@ if __name__ == "__main__":
     if rawSlice is None:
         raise RuntimeError("Could not find slice...")
 
-    parsedSlice = scikit_build_example.unpack(rawSlice, len(rawSlice)) # Avoid including JITTING
+    n = 5
+    r = 10
 
-    parsedSlice = msgpack.unpackb(rawSlice) # Avoid including JITTING
-    n = 1
-    r = 5
+
+    t = Timer(lambda: scikit_build_example.build(rawSlice, len(rawSlice)))
+    times = t.repeat(repeat=r, number=n)
+    print("Native allocate+unpack+assemble: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+                                                                        min(times)/n,
+                                                                        max(times)/n,
+                                                                        np.mean(times)/n))
+    nativeRes1 = scikit_build_example.build(rawSlice, len(rawSlice))
+    plt.figure("Native allocate+unpack+assemble")
+    plt.imshow(nativeRes1.T)
+
+    # Just to grab dims from header and build numpy-arrays
+    parsedSlice = msgpack.unpackb(rawSlice)
+    ass = assembler_slice(None,None,None)   # Note params - not relevant for numpy
+    numpyFromPython = ass._numpyFromHeader(parsedSlice[0]['index'])
+
+    scikit_build_example.unpack(rawSlice, len(rawSlice), numpyFromPython) # Avoid including JITTING
+    t = Timer(lambda: scikit_build_example.unpack(rawSlice, len(rawSlice), numpyFromPython))
+    times = t.repeat(repeat=r, number=n)
+    print("Native          unpack+assemble: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+                                                                        min(times)/n,
+                                                                        max(times)/n,
+                                                                        np.mean(times)/n))
+    plt.figure("Allocate in Python, native build")
+    plt.imshow(numpyFromPython.T)
+
+
     t = Timer(lambda: msgpack.unpackb(rawSlice, use_list=False))
     times = t.repeat(repeat=r, number=n)
-    print("MsgUnpack: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+    print("Python          unpack         : {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
                                                                         min(times)/n,
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
 
-    print(parsedSlice[0])
-    ass = assembler_slice(None,None,None) # Note params - not relevant for numpy
     res = ass.numpy(parsedSlice) # Avoid including time spent in JIT
-
-#    n = 100
-#    r = 5
     t = Timer(lambda: ass.numpy(parsedSlice))
     times = t.repeat(repeat=r, number=n)
-    print("Numpy: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+    print("Python allocate+       assemble: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
                                                                         min(times)/n,
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
 
-    nativeRes = ass._numpyFromHeader(parsedSlice[0]['index'])
-    print(nativeRes.shape)
-    scikit_build_example.assemble(nativeRes, parsedSlice[1])
-#    n = 100
-#    r = 5
-    t = Timer(lambda: scikit_build_example.assemble(nativeRes, parsedSlice[1]))
+    numpyUsingPyDict = ass._numpyFromHeader(parsedSlice[0]['index'])
+    scikit_build_example.assemble_usingpydict(numpyUsingPyDict, parsedSlice[1])
+    t = Timer(lambda: scikit_build_example.assemble_usingpydict(numpyUsingPyDict, parsedSlice[1]))
     times = t.repeat(repeat=r, number=n)
-    print("Native: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+    print("Native          unpack+assemble (using PyDict): {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
                                                                         min(times)/n,
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
     
-    plt.figure("Normal numpy")
+    plt.figure("Pure Python")
     plt.imshow(res.T)
-    plt.figure("Native")
-    plt.imshow(nativeRes.T)
+    plt.figure("Native using PyDict")
+    plt.imshow(numpyUsingPyDict.T)
     plt.show()

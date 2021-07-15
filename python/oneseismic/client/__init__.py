@@ -38,4 +38,4 @@ def new(cache_dir = None):
     session = http_session.fromconfig(cache_dir = cache_dir)
     c = cli(session = session)
     yield c
-    c.shutdown()
+    #c.shutdown()
