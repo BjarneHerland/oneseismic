@@ -73,6 +73,13 @@ if __name__ == "__main__":
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
 
+    t = Timer(lambda: scikit_build_example.unpackOnly(rawSlice, len(rawSlice)))
+    times = t.repeat(repeat=r, number=n)
+    print("Native          unpack         : {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+                                                                        min(times)/n,
+                                                                        max(times)/n,
+                                                                        np.mean(times)/n))
+
     res = ass.numpy(parsedSlice) # Avoid including time spent in JIT
     t = Timer(lambda: ass.numpy(parsedSlice))
     times = t.repeat(repeat=r, number=n)
@@ -85,7 +92,7 @@ if __name__ == "__main__":
     scikit_build_example.assemble_usingpydict(numpyUsingPyDict, parsedSlice[1])
     t = Timer(lambda: scikit_build_example.assemble_usingpydict(numpyUsingPyDict, parsedSlice[1]))
     times = t.repeat(repeat=r, number=n)
-    print("Native          unpack+assemble (using PyDict): {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
+    print("Native (PyDict) unpack+assemble: {} iterations {} repeats  min={:.3f}s  max={:.3f}s  avg={:.3f}s".format(n,r,
                                                                         min(times)/n,
                                                                         max(times)/n,
                                                                         np.mean(times)/n))
